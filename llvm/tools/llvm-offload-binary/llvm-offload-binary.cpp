@@ -84,6 +84,84 @@ static Error writeFile(StringRef Filename, StringRef Data) {
   return Error::success();
 }
 
+// Check if this is an Intel SPIR-V target requiring nested extraction
+static bool needsNestedExtraction(const OffloadBinary *Binary) {
+  StringRef Triple = Binary->getTriple();
+  return Triple.contains("spirv64-intel") || Triple.contains("spirv32-intel");
+}
+
+// Get the appropriate file extension for nested OffloadBinary
+static StringRef getNestedImageExtension(StringRef ImageData) {
+  // Check if image is an inner OffloadBinary
+  if (identify_magic(ImageData) == file_magic::offload_binary) {
+    MemoryBufferRef InnerBuffer(ImageData, "inner-offload-binary");
+    auto InnerBinaries = OffloadBinary::create(InnerBuffer);
+    if (!InnerBinaries || InnerBinaries->empty())
+      return "bin"; // Fallback
+
+    const OffloadBinary *InnerBinary = (*InnerBinaries)[0].get();
+    ImageKind Kind = InnerBinary->getImageKind();
+
+    // Return extension based on inner image kind
+    return getImageKindName(Kind);
+  }
+
+  // Legacy format - assume SPIR-V
+  return "spv";
+}
+
+// Extract image from inner OffloadBinary or legacy formats
+static Error extractFromInnerOffloadBinary(StringRef ImageData,
+                                           StringRef Filename) {
+  // Check if image is an inner OffloadBinary (nested format)
+  if (identify_magic(ImageData) == file_magic::offload_binary) {
+    // Parse inner OffloadBinary
+    MemoryBufferRef InnerBuffer(ImageData, "inner-offload-binary");
+    auto InnerBinaries = OffloadBinary::create(InnerBuffer);
+    if (!InnerBinaries)
+      return InnerBinaries.takeError();
+
+    if (InnerBinaries->size() != 1)
+      return createStringError(inconvertibleErrorCode(),
+                              "Expected single entry in inner OffloadBinary");
+
+    const OffloadBinary *InnerBinary = (*InnerBinaries)[0].get();
+    ImageKind Kind = InnerBinary->getImageKind();
+
+    // Extract image data
+    StringRef ExtractedData = InnerBinary->getImage();
+
+    // Write image to file
+    if (Error Err = writeFile(Filename, ExtractedData))
+      return Err;
+
+    // Display metadata from inner OffloadBinary
+    const char *KindName = nullptr;
+    if (Kind == object::IMG_SPIRV)
+      KindName = "SPIR-V";
+    else if (Kind == object::IMG_Object)
+      KindName = "Native binary";
+    else
+      KindName = "Image";
+
+    outs() << "Extracted " << KindName << ": " << Filename << "\n";
+    outs() << "  Inner metadata:\n";
+    for (auto [Key, Value] : InnerBinary->strings()) {
+      outs() << "    " << Key << " = " << Value << "\n";
+    }
+
+    return Error::success();
+  }
+
+  // Legacy format: Raw SPIR-V or other formats
+  // For now, just write the data as-is (could be raw SPIR-V or ELF-wrapped)
+  if (Error Err = writeFile(Filename, ImageData))
+    return Err;
+
+  outs() << "Extracted: " << Filename << " (legacy format)\n";
+  return Error::success();
+}
+
 static Error bundleImages() {
   SmallVector<char, 1024> BinaryData;
   raw_svector_ostream OS(BinaryData);
@@ -152,6 +230,70 @@ static Error unbundleImages() {
   if (Error Err = extractOffloadBinaries(*Buffer, Binaries))
     return Err;
 
+  // If no --image filter specified, extract all images including nested ones
+  if (DeviceImages.empty()) {
+    BumpPtrAllocator Alloc;
+    StringSaver Saver(Alloc);
+    uint64_t Idx = 0;
+
+    for (const OffloadFile &File : Binaries) {
+      const auto *Binary = File.getBinary();
+
+      // Check if Intel SPIR-V target with nested OffloadBinary
+      if (needsNestedExtraction(Binary)) {
+        StringRef ImageData = Binary->getImage();
+
+        // Check if image contains nested OffloadBinary
+        if (identify_magic(ImageData) == file_magic::offload_binary) {
+          // Parse inner OffloadBinary
+          MemoryBufferRef InnerBuffer(ImageData, "inner-offload-binary");
+          auto InnerBinaries = OffloadBinary::create(InnerBuffer);
+          if (!InnerBinaries)
+            return InnerBinaries.takeError();
+
+          // Extract each inner image
+          for (const auto &InnerBinary : *InnerBinaries) {
+            StringRef Extension = getImageKindName(InnerBinary->getImageKind());
+            StringRef Filename =
+                Saver.save(sys::path::stem(InputFile) + "-" +
+                          Binary->getTriple() + "-" + Binary->getArch() +
+                          "." + std::to_string(Idx++) + "." + Extension);
+
+            if (Error E = writeFile(Filename, InnerBinary->getImage()))
+              return E;
+
+            outs() << "Extracted: " << Filename << "\n";
+            outs() << "  Inner metadata:\n";
+            for (auto [Key, Value] : InnerBinary->strings()) {
+              outs() << "    " << Key << " = " << Value << "\n";
+            }
+          }
+        } else {
+          // Legacy format or raw image
+          StringRef Extension = getNestedImageExtension(ImageData);
+          StringRef Filename =
+              Saver.save(sys::path::stem(InputFile) + "-" + Binary->getTriple() +
+                        "-" + Binary->getArch() + "." + std::to_string(Idx++) +
+                        "." + Extension);
+          if (Error E = writeFile(Filename, ImageData))
+            return E;
+          outs() << "Extracted: " << Filename << " (legacy format)\n";
+        }
+      } else {
+        // Non-nested binary
+        StringRef Filename =
+            Saver.save(sys::path::stem(InputFile) + "-" + Binary->getTriple() +
+                      "-" + Binary->getArch() + "." + std::to_string(Idx++) +
+                      "." + getImageKindName(Binary->getImageKind()));
+        if (Error E = writeFile(Filename, Binary->getImage()))
+          return E;
+        outs() << "Extracted: " << Filename << "\n";
+      }
+    }
+
+    return Error::success();
+  }
+
   // Try to extract each device image specified by the user from the input file.
   for (StringRef Image : DeviceImages) {
     BumpPtrAllocator Alloc;
@@ -197,17 +339,38 @@ static Error unbundleImages() {
         WithColor::warning(errs(), PackagerExecutable)
             << "Multiple inputs match to a single file, '" << It->second
             << "'\n";
-      if (Error E = writeFile(It->second, Extracted.back()->getImage()))
-        return E;
+      const OffloadBinary *Binary = Extracted.back();
+      // Check if Intel SPIR-V target requiring nested extraction
+      if (needsNestedExtraction(Binary)) {
+        if (Error E = extractFromInnerOffloadBinary(Binary->getImage(),
+                                                         It->second))
+          return E;
+      } else {
+        if (Error E = writeFile(It->second, Binary->getImage()))
+          return E;
+      }
     } else {
       uint64_t Idx = 0;
       for (const OffloadBinary *Binary : Extracted) {
-        StringRef Filename =
-            Saver.save(sys::path::stem(InputFile) + "-" + Binary->getTriple() +
-                       "-" + Binary->getArch() + "." + std::to_string(Idx++) +
-                       "." + getImageKindName(Binary->getImageKind()));
-        if (Error E = writeFile(Filename, Binary->getImage()))
-          return E;
+        // Check if Intel SPIR-V target requiring nested extraction
+        if (needsNestedExtraction(Binary)) {
+          // Determine extension from inner OffloadBinary
+          StringRef Extension = getNestedImageExtension(Binary->getImage());
+          StringRef Filename =
+              Saver.save(sys::path::stem(InputFile) + "-" + Binary->getTriple() +
+                         "-" + Binary->getArch() + "." + std::to_string(Idx++) +
+                         "." + Extension);
+          if (Error E = extractFromInnerOffloadBinary(Binary->getImage(),
+                                                           Filename))
+            return E;
+        } else {
+          StringRef Filename =
+              Saver.save(sys::path::stem(InputFile) + "-" + Binary->getTriple() +
+                         "-" + Binary->getArch() + "." + std::to_string(Idx++) +
+                         "." + getImageKindName(Binary->getImageKind()));
+          if (Error E = writeFile(Filename, Binary->getImage()))
+            return E;
+        }
       }
     }
   }

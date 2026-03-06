@@ -273,3 +273,136 @@ TEST(OffloadingTest, checkEdgeCases) {
     EXPECT_EQ(Binaries[0]->getString("large_key").size(), 4096u);
   }
 }
+
+TEST(OffloadingTest, checkNestedOffloadBinaryWithOptions) {
+  // Test nested OffloadBinary structure for Intel SPIR-V format with
+  // compile/link options.
+  // This simulates the new containerization where:
+  // - Inner OffloadBinary contains raw SPIR-V + metadata + options
+  // - Outer OffloadBinary contains the inner OffloadBinary
+
+  // Create mock SPIR-V data (magic bytes: 0x07230203)
+  std::vector<uint8_t> SPIRVData = {0x07, 0x23, 0x02, 0x03, 0x01, 0x00, 0x00,
+                                    0x00, 0x00, 0x00, 0x00, 0x00};
+
+  // Create inner OffloadBinary with SPIR-V
+  OffloadBinary::OffloadingImage InnerImage;
+  InnerImage.TheImageKind = IMG_SPIRV;
+  InnerImage.TheOffloadKind = OFK_OpenMP;
+  InnerImage.Flags = 0;
+
+  // Add metadata to inner binary (migrated from ELF notes)
+  MapVector<StringRef, StringRef> InnerStringData;
+  std::string VersionKey = "version";
+  std::string VersionValue = "1.0";
+  std::string FormatKey = "format";
+  std::string FormatValue = "spirv";
+  std::string TripleKey = "triple";
+  std::string TripleValue = "spirv64-intel";
+  std::string ArchKey = "arch";
+  std::string ArchValue = "unknown";
+  std::string CompileOptsKey = "compile-opts";
+  std::string CompileOptsValue = "-O2 -g";
+  std::string LinkOptsKey = "link-opts";
+  std::string LinkOptsValue = "-cl-fast-relaxed-math";
+
+  InnerStringData[VersionKey] = VersionValue;
+  InnerStringData[FormatKey] = FormatValue;
+  InnerStringData[TripleKey] = TripleValue;
+  InnerStringData[ArchKey] = ArchValue;
+  InnerStringData[CompileOptsKey] = CompileOptsValue;
+  InnerStringData[LinkOptsKey] = LinkOptsValue;
+  InnerImage.StringData = InnerStringData;
+
+  InnerImage.Image = MemoryBuffer::getMemBuffer(
+      StringRef(reinterpret_cast<const char *>(SPIRVData.data()),
+                SPIRVData.size()),
+      "", false);
+
+  // Serialize inner OffloadBinary
+  SmallVector<OffloadBinary::OffloadingImage> InnerImages;
+  InnerImages.push_back(std::move(InnerImage));
+  SmallString<0> InnerBinaryData = OffloadBinary::write(InnerImages);
+
+  // Create outer OffloadBinary containing the inner binary
+  OffloadBinary::OffloadingImage OuterImage;
+  OuterImage.TheImageKind = IMG_SPIRV;
+  OuterImage.TheOffloadKind = OFK_OpenMP;
+  OuterImage.Flags = 0;
+
+  // Outer binary metadata for filtering/selection
+  MapVector<StringRef, StringRef> OuterStringData;
+  std::string OuterTripleKey = "triple";
+  std::string OuterTripleValue = "spirv64-intel";
+  std::string OuterArchKey = "arch";
+  std::string OuterArchValue = "unknown";
+
+  OuterStringData[OuterTripleKey] = OuterTripleValue;
+  OuterStringData[OuterArchKey] = OuterArchValue;
+  OuterImage.StringData = OuterStringData;
+
+  OuterImage.Image = MemoryBuffer::getMemBufferCopy(InnerBinaryData);
+
+  // Serialize outer OffloadBinary
+  SmallVector<OffloadBinary::OffloadingImage> OuterImages;
+  OuterImages.push_back(std::move(OuterImage));
+  SmallString<0> OuterBinaryData = OffloadBinary::write(OuterImages);
+
+  // Parse outer binary
+  auto OuterBuffer = MemoryBuffer::getMemBufferCopy(OuterBinaryData);
+  auto OuterParsed = OffloadBinary::create(*OuterBuffer);
+  ASSERT_THAT_EXPECTED(OuterParsed, Succeeded());
+
+  auto &OuterBinaries = *OuterParsed;
+  ASSERT_EQ(OuterBinaries.size(), 1u);
+
+  const auto &OuterBinary = *OuterBinaries[0];
+  EXPECT_EQ(OuterBinary.getImageKind(), IMG_SPIRV);
+  EXPECT_EQ(OuterBinary.getOffloadKind(), OFK_OpenMP);
+  EXPECT_EQ(OuterBinary.getString("triple"), "spirv64-intel");
+  EXPECT_EQ(OuterBinary.getString("arch"), "unknown");
+
+  // Extract inner binary data
+  StringRef InnerData = OuterBinary.getImage();
+
+  // Verify inner data has OffloadBinary magic bytes (0x10FF10AD)
+  ASSERT_GE(InnerData.size(), 4u);
+  EXPECT_EQ(static_cast<uint8_t>(InnerData[0]), 0x10);
+  EXPECT_EQ(static_cast<uint8_t>(InnerData[1]), 0xFF);
+  EXPECT_EQ(static_cast<uint8_t>(InnerData[2]), 0x10);
+  EXPECT_EQ(static_cast<uint8_t>(InnerData[3]), 0xAD);
+
+  // Parse inner binary
+  MemoryBufferRef InnerBufferRef(InnerData, "inner-offload-binary");
+  auto InnerParsed = OffloadBinary::create(InnerBufferRef);
+  ASSERT_THAT_EXPECTED(InnerParsed, Succeeded());
+
+  auto &InnerBinaries = *InnerParsed;
+  ASSERT_EQ(InnerBinaries.size(), 1u);
+
+  // Verify inner binary metadata including compile/link options
+  const auto &InnerBinary = *InnerBinaries[0];
+  EXPECT_EQ(InnerBinary.getImageKind(), IMG_SPIRV);
+  EXPECT_EQ(InnerBinary.getOffloadKind(), OFK_OpenMP);
+  EXPECT_EQ(InnerBinary.getString("version"), "1.0");
+  EXPECT_EQ(InnerBinary.getString("format"), "spirv");
+  EXPECT_EQ(InnerBinary.getString("triple"), "spirv64-intel");
+  EXPECT_EQ(InnerBinary.getString("arch"), "unknown");
+  EXPECT_EQ(InnerBinary.getString("compile-opts"), "-O2 -g");
+  EXPECT_EQ(InnerBinary.getString("link-opts"), "-cl-fast-relaxed-math");
+
+  // Extract SPIR-V from inner binary
+  StringRef ExtractedSPIRV = InnerBinary.getImage();
+
+  // Verify SPIR-V magic bytes (0x07230203)
+  ASSERT_GE(ExtractedSPIRV.size(), 4u);
+  EXPECT_EQ(static_cast<uint8_t>(ExtractedSPIRV[0]), 0x07);
+  EXPECT_EQ(static_cast<uint8_t>(ExtractedSPIRV[1]), 0x23);
+  EXPECT_EQ(static_cast<uint8_t>(ExtractedSPIRV[2]), 0x02);
+  EXPECT_EQ(static_cast<uint8_t>(ExtractedSPIRV[3]), 0x03);
+
+  // Verify the extracted SPIR-V matches the original
+  EXPECT_EQ(ExtractedSPIRV.size(), SPIRVData.size());
+  EXPECT_TRUE(std::equal(ExtractedSPIRV.begin(), ExtractedSPIRV.end(),
+                         SPIRVData.begin()));
+}

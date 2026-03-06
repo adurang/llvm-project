@@ -161,6 +161,8 @@ The enumerated values for ``image kind`` and ``offload kind`` are:
    +---------------+-------+---------------------------------------+
    | IMG_PTX       | 0x05  | The image is a CUDA PTX file          |
    +---------------+-------+---------------------------------------+
+   | IMG_SPIRV     | 0x06  | The image is a SPIR-V binary file     |
+   +---------------+-------+---------------------------------------+
 
 .. table:: Offload Kind
    :name: table-offload_kind
@@ -178,6 +180,51 @@ The enumerated values for ``image kind`` and ``offload kind`` are:
    +------------+-------+---------------------------------------+
    | OFK_SYCL   | 0x04  | The producer was SYCL                 |
    +------------+-------+---------------------------------------+
+
+NESTED OFFLOADBINARY FORMAT (INTEL SPIR-V)
+-------------------------------------------
+
+Intel SPIR-V targets (``spirv64-intel``, ``spirv32-intel``) use a nested
+OffloadBinary format for improved consistency and extensibility:
+
+.. code-block:: text
+
+   Outer OffloadBinary (in .llvm.offloading section)
+   ├─ ImageKind: IMG_SPIRV
+   ├─ OffloadKind: OFK_OpenMP
+   ├─ Metadata: triple, arch
+   └─ Image data: Inner OffloadBinary
+      ├─ ImageKind: IMG_SPIRV
+      ├─ OffloadKind: OFK_OpenMP
+      ├─ Metadata: version, format, triple, arch
+      └─ Image data: Raw SPIR-V binary (magic: 0x07230203)
+
+The tool automatically detects and extracts SPIR-V from nested format:
+
+.. code-block:: console
+
+  # Compile with Intel SPIR-V target
+  $ clang++ -fopenmp -fopenmp-targets=spirv64-intel kernel.cpp -o myapp
+
+  # Extract SPIR-V (automatically handles nested format)
+  $ llvm-offload-binary myapp
+  Extracted SPIR-V: myapp-spirv64-intel-unknown.0.spv
+    Inner metadata:
+      version = 1.0
+      format = spirv
+      triple = spirv64-intel
+      arch = unknown
+
+  # Validate extracted SPIR-V
+  $ spirv-val myapp-spirv64-intel-unknown.0.spv
+
+**Backward Compatibility:** The runtime supports three formats:
+
+- **Nested OffloadBinary** (new, default): SPIR-V → inner OffloadBinary → outer OffloadBinary
+- **Raw SPIR-V** (legacy): Direct SPIR-V binary with magic ``0x07230203``
+- **ELF-wrapped** (legacy): SPIR-V in ELF object with machine type ``EM_INTELGT``
+
+All three formats are automatically detected and processed correctly.
 
 SEE ALSO
 --------

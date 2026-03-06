@@ -13,6 +13,7 @@
 
 #include "OffloadDump.h"
 #include "llvm-objdump.h"
+#include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/OffloadBinary.h"
 #include "llvm/Object/OffloadBundle.h"
@@ -43,6 +44,84 @@ static StringRef getImageName(const OffloadBinary &OB) {
   }
 }
 
+/// Check if this is an Intel SPIR-V target with nested OffloadBinary
+static bool hasNestedOffloadBinary(const OffloadBinary &OB) {
+  StringRef Triple = OB.getTriple();
+  if (!Triple.contains("spirv64-intel") && !Triple.contains("spirv32-intel"))
+    return false;
+
+  // Check if image data is a nested OffloadBinary
+  StringRef ImageData = OB.getImage();
+  return identify_magic(ImageData) == file_magic::offload_binary;
+}
+
+/// Print information about nested OffloadBinary (inner layer)
+static void printNestedOffloadBinary(const OffloadBinary &OuterOB,
+                                      uint64_t Index) {
+  StringRef ImageData = OuterOB.getImage();
+
+  // Parse inner OffloadBinary
+  MemoryBufferRef InnerBuffer(ImageData, "inner-offload-binary");
+  auto InnerBinariesOrErr = OffloadBinary::create(InnerBuffer);
+  if (!InnerBinariesOrErr) {
+    reportWarning("Failed to parse nested OffloadBinary: " +
+                  toString(InnerBinariesOrErr.takeError()),
+                  OuterOB.getFileName());
+    return;
+  }
+
+  auto &InnerBinaries = *InnerBinariesOrErr;
+  if (InnerBinaries.empty()) {
+    reportWarning("Nested OffloadBinary contains no entries",
+                  OuterOB.getFileName());
+    return;
+  }
+
+  outs() << "  [Nested OffloadBinary format detected]\n";
+  outs() << "  Number of inner images: " << InnerBinaries.size() << "\n";
+
+  // Display information for each inner image
+  for (uint64_t I = 0, E = InnerBinaries.size(); I != E; ++I) {
+    const OffloadBinary *InnerOB = InnerBinaries[I].get();
+
+    if (InnerBinaries.size() > 1)
+      outs() << "  Inner image [" << I << "]:\n";
+
+    outs() << left_justify("    format", 20)
+           << InnerOB->getString("format") << "\n";
+    outs() << left_justify("    version", 20)
+           << InnerOB->getString("version") << "\n";
+    outs() << left_justify("    triple", 20)
+           << InnerOB->getTriple() << "\n";
+    outs() << left_justify("    arch", 20)
+           << InnerOB->getArch() << "\n";
+
+    // Display compile/link options if present
+    StringRef CompileOpts = InnerOB->getString("compile-opts");
+    StringRef LinkOpts = InnerOB->getString("link-opts");
+
+    if (!CompileOpts.empty())
+      outs() << left_justify("    compile-opts", 20) << CompileOpts << "\n";
+    if (!LinkOpts.empty())
+      outs() << left_justify("    link-opts", 20) << LinkOpts << "\n";
+
+    // Display actual image size
+    StringRef InnerImage = InnerOB->getImage();
+    outs() << left_justify("    image size", 20)
+           << InnerImage.size() << " bytes\n";
+
+    // Verify SPIR-V magic if it's SPIR-V
+    if (InnerOB->getImageKind() == IMG_SPIRV && InnerImage.size() >= 4) {
+      uint32_t Magic = *reinterpret_cast<const uint32_t*>(InnerImage.data());
+      if (Magic == 0x07230203)
+        outs() << left_justify("    spir-v magic", 20) << "valid (0x07230203)\n";
+      else
+        outs() << left_justify("    spir-v magic", 20)
+               << "invalid (0x" << format("%08x", Magic) << ")\n";
+    }
+  }
+}
+
 static void printBinary(const OffloadBinary &OB, uint64_t Index) {
   outs() << "\nOFFLOADING IMAGE [" << Index << "]:\n";
   outs() << left_justify("kind", 16) << getImageName(OB) << "\n";
@@ -50,6 +129,11 @@ static void printBinary(const OffloadBinary &OB, uint64_t Index) {
   outs() << left_justify("triple", 16) << OB.getTriple() << "\n";
   outs() << left_justify("producer", 16)
          << getOffloadKindName(OB.getOffloadKind()) << "\n";
+
+  // Check for nested OffloadBinary format
+  if (hasNestedOffloadBinary(OB)) {
+    printNestedOffloadBinary(OB, Index);
+  }
 }
 
 /// Print the embedded offloading contents of an ObjectFile \p O.
