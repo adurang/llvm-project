@@ -93,4 +93,13 @@ bool isThreadLocalMemPtr(void *Ptr);
 
 } // namespace utils
 
+extern int device_debug_state;
+extern char device_debug_buffer[1024];
+static inline void setDebugBuffer(const char *s) {
+  size_t i = 0;
+  for (; s[i] != '\0' && i < sizeof(device_debug_buffer) - 1; ++i)
+    device_debug_buffer[i] = s[i];
+  device_debug_buffer[i] = '\0';
+}
+
 #endif

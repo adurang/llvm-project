@@ -23,6 +23,9 @@
 
 using namespace ompx;
 
+int device_debug_state=1337;
+char device_debug_buffer[1024] = "";
+
 // These flags are copied from "llvm/Frontend/OpenMP/OMPDeviceConstants.h" and
 // must be kept in-sync.
 enum OMPTgtExecModeFlags : unsigned char {
@@ -47,6 +50,8 @@ initializeRuntime(bool IsSPMD, KernelEnvironmentTy &KernelEnvironment,
 /// Simple generic state machine for worker threads.
 static void genericStateMachine(IdentTy *Ident) {
   uint32_t TId = mapping::getThreadIdInBlock();
+
+   device_debug_buffer[TId] = 'G';
 
   do {
     ParallelRegionFnTy WorkFn = nullptr;
@@ -103,6 +108,9 @@ int32_t __kmpc_target_init(KernelEnvironmentTy &KernelEnvironment,
     synchronize::threadsAligned(atomic::relaxed);
     return -1;
   }
+
+  device_debug_buffer[mapping::getNumberOfThreadsInBlock()] = '\0';
+  device_debug_buffer[mapping::getThreadIdInBlock()] = 'S';
 
   if (mapping::isInitialThreadInLevel0(IsSPMD))
     return -1;

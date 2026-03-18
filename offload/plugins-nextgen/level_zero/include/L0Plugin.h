@@ -111,6 +111,30 @@ public:
   Expected<bool> isImageCompatible(StringRef Image) const override;
 };
 
+static inline int getDeviceDebugState(L0DeviceTy &Device) {
+    int Value = -1;
+    auto &Program = Device.getLastProgram();
+    auto Err = Program.readGlobalVariable("device_debug_state", sizeof(Value), &Value);
+    if (Err) {
+      printf("Error reading device_debug_state: %s\n", toString(std::move(Err)).c_str());
+      // If the variable is not found, return -1 as the default debug state.
+      return -1;
+    }
+    return Value;
+}
+
+static inline char *getDeviceDebugBuffer(L0DeviceTy &Device) {
+    static char Value[1024] = "";
+    auto &Program = Device.getLastProgram();
+    auto Err = Program.readGlobalVariable("device_debug_buffer", sizeof(Value), &Value);
+    if (Err) {
+      printf("Error reading device_debug_buffer: %s\n", toString(std::move(Err)).c_str());
+      // If the variable is not found, return an empty buffer.
+      return Value;
+    }
+    return Value;
+}
+
 } // namespace llvm::omp::target::plugin
 
 #endif // OPENMP_LIBOMPTARGET_PLUGINS_NEXTGEN_LEVEL_ZERO_L0PLUGIN_H

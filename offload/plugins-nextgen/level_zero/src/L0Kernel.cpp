@@ -296,6 +296,8 @@ static Error launchKernelWithImmCmdList(L0DeviceTy &l0Device,
     if (auto Err = l0Device.releaseEvent(Event))
       return Err;
   }
+  ODBG("DeviceDebug") << "Debug state after kernel execution: " << getDeviceDebugState(l0Device);
+  ODBG("DeviceDebug") << "Debug buffer content: " << getDeviceDebugBuffer(l0Device);
   INFO(OMP_INFOTYPE_PLUGIN_KERNEL, DeviceId,
        "Executed kernel entry " DPxMOD " on device %s\n", DPxPTR(zeKernel),
        IdStr);
@@ -349,6 +351,11 @@ Error L0KernelTy::setKernelGroups(L0DeviceTy &l0Device, L0LaunchEnvTy &KEnv,
 
   if (KernelEnvironment.Configuration.ExecMode != OMP_TGT_EXEC_MODE_BARE) {
     // For non-bare mode, the groups are already set in the launch.
+    ODBG(OLDT_Kernel) << "Non-bare execution mode, Team sizes = {"
+                      << NumThreads[0] << ", " << NumThreads[1] << ", "
+                      << NumThreads[2] << "}, Number of teams = {"
+                      << NumBlocks[0] << ", " << NumBlocks[1] << ", "
+                      << NumBlocks[2] << "}";
     KEnv.GroupCounts = {NumBlocks[0], NumBlocks[1], NumBlocks[2]};
     CALL_ZE_RET_ERROR(zeKernelSetGroupSize, getZeKernel(), NumThreads[0],
                       NumThreads[1], NumThreads[2]);
