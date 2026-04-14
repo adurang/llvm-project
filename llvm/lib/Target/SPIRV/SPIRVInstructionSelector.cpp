@@ -662,6 +662,7 @@ static bool intrinsicHasSideEffects(Intrinsic::ID ID) {
   case Intrinsic::spv_num_workgroups:
   case Intrinsic::spv_ptrcast:
   case Intrinsic::spv_radians:
+  case Intrinsic::readsteadycounter:
   case Intrinsic::spv_reflect:
   case Intrinsic::spv_refract:
   case Intrinsic::spv_resource_getpointer:
@@ -1350,6 +1351,17 @@ bool SPIRVInstructionSelector::spvSelect(Register ResVReg,
     return true;
   case TargetOpcode::G_DEBUGTRAP:
     return selectDebugTrap(ResVReg, ResType, I);
+  case TargetOpcode::G_READSTEADYCOUNTER: {
+    // Lower G_READSTEADYCOUNTER to OpReadClockKHR with Device scope
+    MachineBasicBlock &BB = *I.getParent();
+    Register ScopeReg = buildI32Constant(SPIRV::Scope::Device, I);
+    auto MIB = BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpReadClockKHR))
+                   .addDef(ResVReg)
+                   .addUse(GR.getSPIRVTypeID(ResType))
+                   .addUse(ScopeReg);
+    MIB.constrainAllUses(TII, TRI, RBI);
+    return true;
+  }
 
   default:
     return false;
@@ -4195,6 +4207,16 @@ bool SPIRVInstructionSelector::selectIntrinsic(Register ResVReg,
   MachineBasicBlock &BB = *I.getParent();
   Intrinsic::ID IID = cast<GIntrinsic>(I).getIntrinsicID();
   switch (IID) {
+  case Intrinsic::readsteadycounter: {
+    // Lower llvm.readsteadycounter to OpReadClockKHR with Device scope
+    Register ScopeReg = buildI32Constant(SPIRV::Scope::Device, I);
+    auto MIB = BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpReadClockKHR))
+                   .addDef(ResVReg)
+                   .addUse(GR.getSPIRVTypeID(ResType))
+                   .addUse(ScopeReg);
+    MIB.constrainAllUses(TII, TRI, RBI);
+    return true;
+  }
   case Intrinsic::spv_load:
     return selectLoad(ResVReg, ResType, I);
   case Intrinsic::spv_store:

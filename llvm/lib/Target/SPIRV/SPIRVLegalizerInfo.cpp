@@ -366,6 +366,9 @@ SPIRVLegalizerInfo::SPIRVLegalizerInfo(const SPIRVSubtarget &ST) {
 
   getActionDefinitionsBuilder({G_STACKSAVE, G_STACKRESTORE}).alwaysLegal();
 
+  getActionDefinitionsBuilder({G_READCYCLECOUNTER, G_READSTEADYCOUNTER})
+      .alwaysLegal();
+
   getActionDefinitionsBuilder(G_INTTOPTR)
       .legalForCartesianProduct(allPtrs, allIntScalars)
       .legalIf(

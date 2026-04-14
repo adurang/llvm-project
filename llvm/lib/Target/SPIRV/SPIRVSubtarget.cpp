@@ -101,6 +101,7 @@ SPIRVSubtarget::SPIRVSubtarget(const Triple &TT, const std::string &CPU,
     Extensions.insert(SPIRV::Extension::SPV_INTEL_function_pointers);
     Extensions.insert(
         SPIRV::Extension::SPV_EXT_relaxed_printf_string_address_space);
+    Extensions.insert(SPIRV::Extension::SPV_KHR_shader_clock);
   }
   if (TargetTriple.getVendor() == Triple::AMD)
     Extensions = SPIRVExtensionsParser::getValidExtensions(TargetTriple);
