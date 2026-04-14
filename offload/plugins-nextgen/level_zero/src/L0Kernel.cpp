@@ -290,6 +290,9 @@ static Error launchKernelWithImmCmdList(L0DeviceTy &l0Device,
        "Kernel depends on %zu data copying events.\n", NumWaitEvents);
   Error AllErrors = Error::success();
 
+  resetDeviceBuffer(l0Device);
+  setDeviceDebugState(l0Device, 42);
+
   CALL_ZE_ACCUM_ERROR(AllErrors, zeCommandListAppendLaunchKernel, CmdList,
                       zeKernel, &KEnv.GroupCounts, Event, NumWaitEvents,
                       WaitEvents);

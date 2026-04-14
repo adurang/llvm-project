@@ -111,6 +111,25 @@ public:
   Expected<bool> isImageCompatible(StringRef Image) const override;
 };
 
+static inline void setDeviceDebugState(L0DeviceTy &Device, int Value) {
+    auto &Program = Device.getLastProgram();
+    auto Err = Program.writeGlobalVariable("device_debug_state", sizeof(Value), &Value);
+    if (Err) {
+      printf("Error writing device_debug_state: %s\n", toString(std::move(Err)).c_str());
+    }
+}
+
+static inline void resetDeviceBuffer(L0DeviceTy &Device) {
+    static char Buffer[1024] = "";
+    for (size_t i = 0; i < sizeof(Buffer); i++)
+      Buffer[i] = '\0';
+    auto &Program = Device.getLastProgram();
+    auto Err = Program.writeGlobalVariable("device_debug_buffer", sizeof(Buffer), &Buffer);
+    if (Err) {
+      printf("Error resetting device_debug_buffer: %s\n", toString(std::move(Err)).c_str());
+    }
+}
+
 static inline int getDeviceDebugState(L0DeviceTy &Device) {
     int Value = -1;
     auto &Program = Device.getLastProgram();
