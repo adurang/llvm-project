@@ -39,18 +39,48 @@ protected:
   /// Whether the queue is in-order or out-of-order.
   bool CreateQueueInOrder;
 
+  /// Contains information about pending memory copies.
+  struct PendingCopyDescTy {
+    const void *Src;
+    void *Dst;
+    size_t Size;
+  };
+
+  /// Pending staging buffer to host copies.
+  llvm::SmallVector<PendingCopyDescTy> H2MList;
+  /// Pending USM memory copy commands that must wait for kernel completion.
+  llvm::SmallVector<PendingCopyDescTy> USM2MList;
+
+  /// Mutex to protect access to H2MList and USM2MList.
+  std::mutex CopyQueuesMtx;
+
+  /// Process pending copy queues.
+  void processCopyQueues();
+
+  /// Check if staging buffer should be used for the given size and pointer.
+  bool shouldUseStagingBuffer(size_t Size, const void *Ptr) const;
+
+  bool hasPendingMemoryCopies() {
+    return !H2MList.empty() || !USM2MList.empty();
+  }
+
 public:
   L0QueueTy(L0DeviceTy &Device, bool IsInorder = true)
       : Device(Device), CreateQueueInOrder(IsInorder) {}
   virtual ~L0QueueTy() {}
 
   /// Clear data.
-  void reset() { resetImpl(); }
+  void reset() {
+    resetImpl();
+    std::lock_guard<std::mutex> Lock(CopyQueuesMtx);
+    H2MList.clear();
+    USM2MList.clear();
+  }
 
   Error init();
   Error deinit();
-  Error synchronize() { return synchronizeImpl(); }
-  Expected<bool> hasPendingWork() { return hasPendingWorkImpl(); }
+  Error synchronize();
+  Expected<bool> hasPendingWork();
 
   Error memoryCopy(void *Dst, const void *Src, size_t Size) {
     if (Size == 0)
@@ -61,13 +91,8 @@ public:
     return memoryCopyImpl(Dst, Src, Size);
   }
 
-  Error dataRetrieve(void *HstPtr, const void *TgtPtr, int64_t Size) {
-    return dataRetrieveImpl(HstPtr, TgtPtr, Size);
-  }
-
-  Error dataSubmit(void *TgtPtr, const void *HstPtr, int64_t Size) {
-    return dataSubmitImpl(TgtPtr, HstPtr, Size);
-  }
+  Error dataRetrieve(void *HstPtr, const void *TgtPtr, int64_t Size);
+  Error dataSubmit(void *TgtPtr, const void *HstPtr, int64_t Size);
 
   Error memoryFill(void *Ptr, const void *Pattern, size_t PatternSize,
                    size_t Size) {
@@ -115,15 +140,7 @@ public:
 
   virtual Error synchronizeImpl() = 0;
   virtual Expected<bool> hasPendingWorkImpl() = 0;
-  virtual bool hasPendingMemoryCopies() { return false; }
   virtual Error memoryCopyImpl(void *Dst, const void *Src, size_t Size) = 0;
-  virtual Error dataRetrieveImpl(void *HstPtr, const void *TgtPtr,
-                                 int64_t Size) {
-    return memoryCopy(HstPtr, TgtPtr, Size);
-  }
-  virtual Error dataSubmitImpl(void *TgtPtr, const void *HstPtr, int64_t Size) {
-    return memoryCopy(TgtPtr, HstPtr, Size);
-  }
   virtual Error launchKernelImpl(ze_kernel_handle_t Kernel,
                                  L0LaunchEnvTy &KEnv) = 0;
 
@@ -148,21 +165,8 @@ protected:
   /// Kernel event not signaled.
   ze_event_handle_t KernelEvent = nullptr;
 
-  /// Contains information about pending memory copies.
-  struct PendingCopyDescTy {
-    const void *Src;
-    void *Dst;
-    size_t Size;
-  };
-
-  /// Pending staging buffer to host copies.
-  llvm::SmallVector<PendingCopyDescTy> H2MList;
-  /// Pending USM memory copy commands that must wait for kernel completion.
-  llvm::SmallVector<PendingCopyDescTy> USM2MList;
-
   virtual std::tuple<size_t, ze_event_handle_t *> getMemCopyEvents();
   virtual std::tuple<size_t, ze_event_handle_t *> getLaunchKernelEvents();
-  void processCopyQueues();
 
 public:
   L0AsyncQueueTy(L0DeviceTy &Device) : L0QueueTy(Device, /*IsInorder*/ false) {}
@@ -177,13 +181,7 @@ public:
   void resetImpl() override;
   Error synchronizeImpl() override;
   Expected<bool> hasPendingWorkImpl() override;
-  bool hasPendingMemoryCopies() override {
-    return !H2MList.empty() || !USM2MList.empty();
-  }
   Error memoryCopyImpl(void *Dst, const void *Src, size_t Size) override;
-  Error dataRetrieveImpl(void *HstPtr, const void *TgtPtr,
-                         int64_t Size) override;
-  Error dataSubmitImpl(void *TgtPtr, const void *HstPtr, int64_t Size) override;
   Error launchKernelImpl(ze_kernel_handle_t Kernel,
                          L0LaunchEnvTy &KEnv) override;
   Error memoryFillImpl(void *Ptr, const void *Pattern, size_t PatternSize,

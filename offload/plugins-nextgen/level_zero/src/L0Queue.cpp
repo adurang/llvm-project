@@ -20,6 +20,25 @@ namespace llvm::omp::target::plugin {
 
 /// common methods
 
+bool L0QueueTy::shouldUseStagingBuffer(size_t Size, const void *Ptr) const {
+  return Device.isDiscreteDevice() &&
+         Size <= Device.getPlugin().getOptions().StagingBufferSize &&
+         Device.getMemAllocType(Ptr) != ZE_MEMORY_TYPE_HOST;
+}
+
+void L0QueueTy::processCopyQueues() {
+  std::lock_guard<std::mutex> Lock(CopyQueuesMtx);
+  auto processQueue = [](auto &Queue) {
+    for (auto &[Src, Dst, Size] : Queue)
+      std::copy_n(static_cast<const char *>(Src), Size,
+                  static_cast<char *>(Dst));
+    Queue.clear();
+  };
+
+  processQueue(USM2MList);
+  processQueue(H2MList);
+}
+
 Error L0QueueTy::init() {
   auto CmdListOrErr = Device.getCmdListManager(CreateQueueInOrder);
   if (!CmdListOrErr)
@@ -39,6 +58,78 @@ Error L0QueueTy::deinit() {
 
   CmdList = nullptr;
   return Plugin::success();
+}
+
+Error L0QueueTy::synchronize() {
+  if (auto Err = synchronizeImpl())
+    return Err;
+  processCopyQueues();
+  return Plugin::success();
+}
+
+Expected<bool> L0QueueTy::hasPendingWork() {
+  auto PendingWorkOrErr = hasPendingWorkImpl();
+  if (!PendingWorkOrErr)
+    return PendingWorkOrErr.takeError();
+
+  if (*PendingWorkOrErr)
+    return true;
+
+  processCopyQueues();
+  return false;
+}
+
+Error L0QueueTy::dataRetrieve(void *HstPtr, const void *TgtPtr, int64_t Size) {
+  auto TgtPtrType = Device.getMemAllocType(TgtPtr);
+  if (TgtPtrType == ZE_MEMORY_TYPE_HOST ||
+      TgtPtrType == ZE_MEMORY_TYPE_SHARED) {
+    // Always defer Host/Shared USM to host memory copy to synchronization time.
+    std::lock_guard<std::mutex> Lock(CopyQueuesMtx);
+    USM2MList.emplace_back(
+        PendingCopyDescTy{TgtPtr, HstPtr, static_cast<size_t>(Size)});
+    return Plugin::success();
+  }
+
+  void *DstPtr = HstPtr;
+  if (shouldUseStagingBuffer(Size, HstPtr)) {
+    auto PtrOrErr = Device.getStagingBuffer().get(/*IsAsync*/ true);
+    if (!PtrOrErr)
+      return PtrOrErr.takeError();
+    DstPtr = *PtrOrErr;
+  }
+
+  if (auto Err = memoryCopy(DstPtr, TgtPtr, Size))
+    return Err;
+
+  if (DstPtr != HstPtr) {
+    std::lock_guard<std::mutex> Lock(CopyQueuesMtx);
+    H2MList.emplace_back(
+        PendingCopyDescTy{DstPtr, HstPtr, static_cast<size_t>(Size)});
+  }
+  return Plugin::success();
+}
+
+Error L0QueueTy::dataSubmit(void *TgtPtr, const void *HstPtr, int64_t Size) {
+  const auto TgtPtrType = Device.getMemAllocType(TgtPtr);
+  if (TgtPtrType == ZE_MEMORY_TYPE_SHARED ||
+      TgtPtrType == ZE_MEMORY_TYPE_HOST) {
+    std::copy_n(static_cast<const char *>(HstPtr), Size,
+                static_cast<char *>(TgtPtr));
+    return Plugin::success();
+  }
+
+  const void *SrcPtr = HstPtr;
+
+  if (shouldUseStagingBuffer(Size, HstPtr)) {
+    auto PtrOrErr = Device.getStagingBuffer().get(/*IsAsync*/ true);
+    if (!PtrOrErr)
+      return PtrOrErr.takeError();
+    SrcPtr = *PtrOrErr;
+    std::copy_n(static_cast<const char *>(HstPtr), Size,
+                static_cast<char *>(const_cast<void *>(SrcPtr)));
+  }
+
+  return memoryCopy(TgtPtr, SrcPtr, Size);
 }
 
 Error L0QueueTy::dispatchLaunchKernel(ze_kernel_handle_t Kernel,
@@ -73,20 +164,6 @@ Error L0AsyncQueueTy::deinitImpl() {
 void L0AsyncQueueTy::resetImpl() {
   WaitEvents.clear();
   KernelEvent = nullptr;
-  H2MList.clear();
-  USM2MList.clear();
-}
-
-void L0AsyncQueueTy::processCopyQueues() {
-  auto processQueue = [](auto &Queue) {
-    for (auto &[Src, Dst, Size] : Queue)
-      std::copy_n(static_cast<const char *>(Src), Size,
-                  static_cast<char *>(Dst));
-    Queue.clear();
-  };
-
-  processQueue(USM2MList);
-  processQueue(H2MList);
 }
 
 Error L0AsyncQueueTy::synchronizeImpl() {
@@ -111,17 +188,11 @@ Error L0AsyncQueueTy::synchronizeImpl() {
   WaitEvents.clear();
   KernelEvent = nullptr;
 
-  processCopyQueues();
-
   return SyncErrors;
 }
 
 Expected<bool> L0AsyncQueueTy::hasPendingWorkImpl() {
-  if (!WaitEvents.empty())
-    return true;
-
-  processCopyQueues();
-  return false;
+  return !WaitEvents.empty();
 }
 
 std::tuple<size_t, ze_event_handle_t *> L0AsyncQueueTy::getMemCopyEvents() {
@@ -152,73 +223,6 @@ Error L0AsyncQueueTy::memoryCopyImpl(void *Dst, const void *Src, size_t Size) {
       AllErrors = joinErrors(std::move(AllErrors), std::move(Err));
   }
   return AllErrors;
-}
-
-Error L0AsyncQueueTy::dataRetrieveImpl(void *HstPtr, const void *TgtPtr,
-                                       int64_t Size) {
-  auto TgtPtrType = Device.getMemAllocType(TgtPtr);
-  if (TgtPtrType == ZE_MEMORY_TYPE_HOST ||
-      TgtPtrType == ZE_MEMORY_TYPE_SHARED) {
-    bool CopyNow = true;
-    if (KernelEvent) {
-      // Delay Host/Shared USM to host memory copy since it must wait for
-      // kernel completion.
-      USM2MList.emplace_back(
-          PendingCopyDescTy{TgtPtr, HstPtr, static_cast<size_t>(Size)});
-      CopyNow = false;
-    }
-    if (CopyNow) {
-      std::copy_n(static_cast<const char *>(TgtPtr), Size,
-                  static_cast<char *>(HstPtr));
-    }
-    return Plugin::success();
-  }
-
-  void *DstPtr = HstPtr;
-  if (Device.isDiscreteDevice() &&
-      static_cast<size_t>(Size) <=
-          Device.getPlugin().getOptions().StagingBufferSize &&
-      Device.getMemAllocType(HstPtr) != ZE_MEMORY_TYPE_HOST) {
-    auto PtrOrErr = Device.getStagingBuffer().get(/*IsAsync*/ true);
-    if (!PtrOrErr)
-      return PtrOrErr.takeError();
-    DstPtr = *PtrOrErr;
-  }
-
-  if (auto Err = memoryCopy(DstPtr, TgtPtr, Size))
-    return Err;
-
-  if (DstPtr != HstPtr)
-    H2MList.emplace_back(
-        PendingCopyDescTy{DstPtr, HstPtr, static_cast<size_t>(Size)});
-  return Plugin::success();
-}
-
-Error L0AsyncQueueTy::dataSubmitImpl(void *TgtPtr, const void *HstPtr,
-                                     int64_t Size) {
-  const auto TgtPtrType = Device.getMemAllocType(TgtPtr);
-  if (TgtPtrType == ZE_MEMORY_TYPE_SHARED ||
-      TgtPtrType == ZE_MEMORY_TYPE_HOST) {
-    std::copy_n(static_cast<const char *>(HstPtr), Size,
-                static_cast<char *>(TgtPtr));
-    return Plugin::success();
-  }
-
-  const void *SrcPtr = HstPtr;
-
-  if (Device.isDiscreteDevice() &&
-      static_cast<size_t>(Size) <=
-          Device.getPlugin().getOptions().StagingBufferSize &&
-      Device.getMemAllocType(HstPtr) != ZE_MEMORY_TYPE_HOST) {
-    auto PtrOrErr = Device.getStagingBuffer().get(/*IsAsync*/ true);
-    if (!PtrOrErr)
-      return PtrOrErr.takeError();
-    SrcPtr = *PtrOrErr;
-    std::copy_n(static_cast<const char *>(HstPtr), Size,
-                static_cast<char *>(const_cast<void *>(SrcPtr)));
-  }
-
-  return memoryCopy(TgtPtr, SrcPtr, Size);
 }
 
 Error L0AsyncQueueTy::dataFenceImpl() {
@@ -287,7 +291,6 @@ Error L0AsyncOrderedQueueTy::synchronizeImpl() {
       SyncErrors = joinErrors(std::move(SyncErrors), std::move(Err));
   }
 
-  processCopyQueues();
   WaitEvents.clear();
   KernelEvent = nullptr;
 
