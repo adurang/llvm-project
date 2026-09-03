@@ -281,15 +281,6 @@ bool isTracingEnabled() {
 bool isValidationEnabled() { return OffloadContext::get().ValidationEnabled; }
 bool isOffloadInitialized() { return OffloadContextVal != nullptr; }
 
-// Temporary helper to be able to transition from the liboffload API to the
-// plugin API. Only to be used to assist in the libomptarget transition. This
-// will be removed once the transition is complete.
-extern "C" GenericPluginTy *
-olGetPluginFromPlatform(ol_platform_handle_t Platform) {
-  return Platform->Plugin.get();
-}
-// End of temporary helper
-
 template <typename HandleT> Error olDestroy(HandleT Handle) {
   delete Handle;
   return Error::success();
@@ -1129,7 +1120,6 @@ Error olMemcpy_impl(ol_queue_handle_t Queue, void *DstPtr,
       std::memcpy(DstPtr, SrcPtr, Size);
       return Error::success();
     }
-
     return Queue->Device->Device->dataMemcpy(DstPtr, SrcPtr, Size,
                                              Queue->AsyncInfo);
   }
@@ -1497,6 +1487,18 @@ Error olQueryQueue_impl(ol_queue_handle_t Queue, bool *IsQueueWorkCompleted) {
   }
   return Error::success();
 }
+
+// Temporary helper to be able to transition from the liboffload API to the
+// plugin API. Only to be used to assist in the libomptarget transition. This
+// will be removed once the transition is complete.
+extern "C" GenericPluginTy *
+olGetPluginFromPlatform(ol_platform_handle_t Platform) {
+  return Platform->Plugin.get();
+}
+extern "C" __tgt_async_info *olGetAsyncInfoFromQueue(ol_queue_handle_t Queue) {
+  return Queue->AsyncInfo;
+}
+// End of temporary helper
 
 } // namespace offload
 } // namespace llvm
