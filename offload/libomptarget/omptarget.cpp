@@ -221,8 +221,8 @@ void *targetLockExplicit(void *HostPtr, size_t Size, int DeviceNum,
 
   auto LockedPtrOrErr = DeviceOrErr->registerMemory(HostPtr, Size);
   if (!LockedPtrOrErr) {
-    ODBG(ODT_Interface) << "Could not lock ptr " << HostPtr << ": "
-                        << toString(LockedPtrOrErr.takeError());
+    REPORT() << "Could not lock ptr " << HostPtr << ": "
+             << toString(LockedPtrOrErr.takeError());
     return nullptr;
   }
   ODBG(ODT_Interface) << Name << " returns device ptr " << *LockedPtrOrErr;
@@ -238,8 +238,8 @@ void targetUnlockExplicit(void *HostPtr, int DeviceNum, const char *Name) {
     FATAL_MESSAGE(DeviceNum, "%s", toString(DeviceOrErr.takeError()).c_str());
 
   if (auto Err = DeviceOrErr->unregisterMemory(HostPtr))
-    ODBG(ODT_Interface) << "Could not unlock ptr " << HostPtr << ": "
-                        << toString(std::move(Err));
+    REPORT() << "Could not unlock ptr " << HostPtr << ": "
+             << toString(std::move(Err));
   ODBG(ODT_Interface) << Name << " returns";
 }
 
