@@ -213,6 +213,15 @@ Error GenericDeviceTy::unloadBinary(DeviceImageTy *Image) {
   return unloadBinaryImpl(Image);
 }
 
+Error GenericDeviceTy::shutdownRPCServer() {
+  if (!RPCServer)
+    return Plugin::success();
+  if (auto Err = RPCServer->deinitDevice(*this))
+    return Err;
+  RPCServer = nullptr;
+  return Plugin::success();
+}
+
 Error GenericDeviceTy::deinit(GenericPluginTy &Plugin,
                               GenericProfilerTy *ProfilerPtr) {
 

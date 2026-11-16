@@ -232,12 +232,25 @@ GenericGlobalHandlerTy::readProfilingGlobals(GenericDeviceTy &Device,
   if (auto Err = readGlobalFromDevice(Device, Image, TableGlobal))
     return Err;
 
+  static Int32Envar DebugTable("LIBOMPTARGET_PGO_READBACK_DEBUG", 0);
+  if (DebugTable.get())
+    errs() << "PGO readback: table read ok; names=[" << Table.NamesStart << ","
+           << Table.NamesStop << ") counters=[" << Table.CountersStart << ","
+           << Table.CountersStop << ") data=[" << Table.DataStart << ","
+           << Table.DataStop << ") version@" << Table.VersionVar << "\n";
+
   // Read the contiguous data from one of the profiling sections on the device.
   auto ReadSection = [&](const void *Start, const void *Stop,
                          SmallVector<char> &Out) -> Error {
     uintptr_t Begin = reinterpret_cast<uintptr_t>(Start);
     uintptr_t End = reinterpret_cast<uintptr_t>(Stop);
     size_t Size = End - Begin;
+    // TEMPORARY: LIBOMPTARGET_PGO_READBACK_DEBUG=1 prints every range.
+    static Int32Envar DebugReadback("LIBOMPTARGET_PGO_READBACK_DEBUG", 0);
+    if (DebugReadback.get())
+      errs() << "PGO readback: device range [" << Start << ", " << Stop
+             << ") size=" << Size << (End < Begin ? " (STOP < START!)" : "")
+             << "\n";
     Out.resize_for_overwrite(Size);
     return Size ? Device.dataRetrieve(Out.data(), Start, Size,
                                       /*AsyncInfo=*/nullptr)

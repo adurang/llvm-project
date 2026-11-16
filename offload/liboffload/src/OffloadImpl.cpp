@@ -1308,6 +1308,16 @@ Error olDestroyProgram_impl(ol_program_handle_t Program) {
     LoadedImages.erase(It);
 
   Error Result = Device.callGlobalDestructors(Device.Plugin, *Image);
+
+  // TEMPORARY experiment: set LIBOMPTARGET_DESTROY_PROGRAM_STOP_RPC=1 to stop
+  // the RPC server before unloadBinary (which reads PGO data back from the
+  // device), mirroring the order GenericDeviceTy::deinit used before the
+  // programs were destroyed on unregister. Only safe if this is the last
+  // program on the device.
+  static Int32Envar StopRPC("LIBOMPTARGET_DESTROY_PROGRAM_STOP_RPC", 0);
+  if (StopRPC.get())
+    Result = joinErrors(std::move(Result), Device.shutdownRPCServer());
+
   Result = joinErrors(std::move(Result), Device.unloadBinary(Image));
   return joinErrors(std::move(Result), olDestroy(Program));
 }

@@ -891,6 +891,10 @@ struct GenericDeviceTy : public DeviceAllocatorTy {
   Error unloadBinary(DeviceImageTy *Image);
   virtual Error unloadBinaryImpl(DeviceImageTy *Image) = 0;
 
+  /// TEMPORARY (debugging aid): flush and deinitialize this device's RPC
+  /// server, as GenericDeviceTy::deinit does. No-op if none is running.
+  Error shutdownRPCServer();
+
   // Setup the RPC server for this device if needed. This may not run on some
   // plugins like the CPU targets. By default, it will not be executed so it is
   // up to the target to override this using the shouldSetupRPCServer function.
